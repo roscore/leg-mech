@@ -18,6 +18,8 @@ const SHANK: f32 = 0.40;
 pub enum Action {
     /// Knee angle (deg).
     Knee(f64),
+    /// Knee angle change (deg), when the sagittal plane is seen edge-on.
+    KneeDelta(f64),
     /// Ankle pitch / roll increments (deg).
     Ankle(f64, f64),
 }
@@ -428,10 +430,15 @@ impl Scene {
             Pick::Handle => {
                 // Point under the pointer on the sagittal plane z = 0, angle of knee → point.
                 let (o, d) = self.ray(x, y);
-                math::ray_plane(o, d, [0.0, KNEE_H, 0.0], [0.0, 0.0, 1.0]).map(|p| {
-                    let (px, py) = (p[0], p[1] - KNEE_H);
-                    Action::Knee((-px).atan2(-py).to_degrees() as f64)
-                })
+                if d[2].abs() < 0.3 {
+                    // Plane nearly edge-on (front view): vertical drag flexes the knee.
+                    Some(Action::KneeDelta(-dy as f64 * 0.4))
+                } else {
+                    math::ray_plane(o, d, [0.0, KNEE_H, 0.0], [0.0, 0.0, 1.0]).map(|p| {
+                        let (px, py) = (p[0], p[1] - KNEE_H);
+                        Action::Knee((-px).atan2(-py).to_degrees() as f64)
+                    })
+                }
             }
             Pick::None => {
                 if buttons & 2 != 0 {

@@ -622,6 +622,10 @@ fn wire_view() {
             let _ = el("view").unchecked_ref::<HtmlElement>().style().set_property("cursor", cursor);
             match act {
                 Some(Action::Knee(q)) => set_joint(a, q, 0.0),
+                Some(Action::KneeDelta(dq)) => {
+                    let q = a.q_deg + dq;
+                    set_joint(a, q, 0.0);
+                }
                 Some(Action::Ankle(dp, dr)) => {
                     let (q, r) = (a.q_deg + dp, a.roll_deg + dr);
                     set_joint(a, q, r);
