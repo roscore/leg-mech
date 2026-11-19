@@ -366,7 +366,14 @@ pub fn find(m: &Mech, roll: f64, load: &Load, base: &Inputs, top: usize) -> Vec<
             }
         }
     }
-    hits.sort_by(|a, b| b.eval.min_margin.partial_cmp(&a.eval.min_margin).unwrap_or(std::cmp::Ordering::Equal));
+    // Margin first (ties within 0.1 %), then fewer warnings, then the smaller (lighter) screw.
+    hits.sort_by(|a, b| {
+        let (ma, mb) = (a.eval.min_margin, b.eval.min_margin);
+        if (ma - mb).abs() > 1e-3 * ma.max(mb) {
+            return mb.partial_cmp(&ma).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        (a.eval.overall, a.d_mm, a.lead_mm).partial_cmp(&(b.eval.overall, b.d_mm, b.lead_mm)).unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(top);
     hits
 }
@@ -478,8 +485,10 @@ mod tests {
         let hits = find(&m, 0.0, &Load::default_for(&m), &default_actuator(), 8);
         assert!(!hits.is_empty());
         for w in hits.windows(2) {
-            assert!(w[0].eval.min_margin >= w[1].eval.min_margin);
+            assert!(w[0].eval.min_margin >= w[1].eval.min_margin * (1.0 - 1e-3));
         }
+        // Equal margins (same motor-limited thrust): an all-OK design ranks before a warning one.
+        assert_eq!(hits[0].eval.overall, Status::Ok);
         assert!(hits.iter().all(|h| h.eval.overall != Status::Fail && h.eval.min_margin >= 1.0));
     }
 }

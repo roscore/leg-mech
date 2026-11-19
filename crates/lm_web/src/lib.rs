@@ -440,7 +440,7 @@ fn render_hud(a: &App) {
         f(p.tau_av),
         tr(ko, "margin", "여유"),
         p.margin.min(999.0),
-        f(p.f_req),
+        if p.f_req >= 1e9 { "—".to_string() } else { f(p.f_req) },
         f(p.v_req * 1000.0)
     );
     set_html("hud", &hud);
