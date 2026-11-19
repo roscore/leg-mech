@@ -204,35 +204,34 @@ pub fn sweep_span(m: &Mech) -> (f64, f64) {
     }
 }
 
+/// Torque / speed numbers of one mechanism pose for an actuator with limits `lim`.
+pub fn point(p: &crate::mech::Pose, load: &Load, lim: &Limits) -> Point {
+    let omega = load.speed_dps.to_radians().abs();
+    let tau_req = load.tau_req(p.q);
+    let v_req = omega * p.h_speed;
+    let tau_av = if p.flag == Flag::Fail { 0.0 } else { lim.f_max(v_req) * p.h_force };
+    let f_req = if p.h_force > 1e-9 { tau_req / p.h_force } else { 1e9 };
+    let omega_max = if p.h_speed > 1e-9 { (lim.v_lim / p.h_speed).to_degrees() } else { 1e5 };
+    Point {
+        q_deg: p.q.to_degrees(),
+        tau_req,
+        tau_av,
+        omega_max_dps: finite(omega_max, 1e5),
+        h: p.h_force,
+        h_speed: p.h_speed,
+        mu_deg: p.mu_deg,
+        f_req: finite(f_req, 1e9),
+        v_req,
+        margin: finite(tau_av / tau_req.max(1e-6), 1e6),
+        flag: p.flag,
+        s: p.s,
+    }
+}
+
 /// Evaluate actuator `inp` on mechanism `m` (ankle at fixed `roll`, rad) under `load`.
 pub fn evaluate(m: &Mech, roll: f64, load: &Load, inp: &Inputs) -> Eval {
     let lim = limits(inp);
-    let omega = load.speed_dps.to_radians().abs();
-    let pts: Vec<Point> = m
-        .sweep(SAMPLES, roll)
-        .into_iter()
-        .map(|p| {
-            let tau_req = load.tau_req(p.q);
-            let v_req = omega * p.h_speed;
-            let tau_av = if p.flag == Flag::Fail { 0.0 } else { lim.f_max(v_req) * p.h_force };
-            let f_req = if p.h_force > 1e-9 { tau_req / p.h_force } else { 1e9 };
-            let omega_max = if p.h_speed > 1e-9 { (lim.v_lim / p.h_speed).to_degrees() } else { 1e5 };
-            Point {
-                q_deg: p.q.to_degrees(),
-                tau_req,
-                tau_av,
-                omega_max_dps: finite(omega_max, 1e5),
-                h: p.h_force,
-                h_speed: p.h_speed,
-                mu_deg: p.mu_deg,
-                f_req: finite(f_req, 1e9),
-                v_req,
-                margin: finite(tau_av / tau_req.max(1e-6), 1e6),
-                flag: p.flag,
-                s: p.s,
-            }
-        })
-        .collect();
+    let pts: Vec<Point> = m.sweep(SAMPLES, roll).into_iter().map(|p| point(&p, load, &lim)).collect();
 
     let (mut min_margin, mut q_at_min) = (f64::INFINITY, m.q_min_deg);
     for p in &pts {

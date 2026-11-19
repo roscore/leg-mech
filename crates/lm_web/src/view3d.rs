@@ -1,72 +1,37 @@
-//! 3D actuator scene: helical screw, travelling nut + carriage, end supports, motor (+ belt),
-//! force arrows, whirl ghost; orbit camera, presets, carriage / end-support dragging.
+//! 3D leg scene: fixed thigh, swinging shank (knee) or foot plate on a universal joint (ankle),
+//! linkage bars and pins, and each actuator as motor can + spinning screw + sliding nut + rod.
+//! Orbit camera with side / front presets; drag the shank tip or the toe to set the joint.
 use crate::gl::{self, Mesh, Paint, Renderer};
 use crate::math::{self, Orbit, OrbitCam, M4, V};
-use lm_core::{Inputs, Kind, Results, Status, Support};
-use std::f32::consts::{PI, TAU};
+use lm_core::mech::{foot_rot, Kind, Mech};
+use lm_core::Inputs;
+use std::f32::consts::TAU;
+
+/// Knee axis height above the ground (m).
+pub const KNEE_H: f32 = 0.52;
+/// Ankle axis height above the ground (m).
+pub const ANK_H: f32 = 0.14;
+const THIGH: f32 = 0.42;
+const SHANK: f32 = 0.40;
 
 /// What a drag in the view asks the app to change.
 pub enum Action {
-    /// Forward-move position along the stroke (m).
-    Scrub(f64),
-    /// New length between supports (mm).
-    Length(f64),
+    /// Knee angle (deg).
+    Knee(f64),
+    /// Ankle pitch / roll increments (deg).
+    Ankle(f64, f64),
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Pick {
-    None,
-    Carriage,
-    End,
-}
-
-/// Layout of the current frame, kept for picking.
-#[derive(Clone, Copy, Default)]
-struct Layout {
-    o: V,
-    ax: V,
-    ey: V,
-    ez: V,
-    len: f32,
-    x_start: f32,
-    x_end: f32,
-    carriage: V,
-    end: V,
-    pick_r: f32,
-}
-
-impl Layout {
-    fn fw(&self, p: V) -> V {
-        math::add(math::add(math::scale(self.ax, p[0]), math::scale(self.ey, p[1])), math::scale(self.ez, p[2]))
-    }
-    fn at(&self, p: V) -> V {
-        math::add(self.o, self.fw(p))
-    }
-    /// Box centred at frame point `c` with frame-aligned size `s`.
-    fn boxm(&self, c: V, s: V) -> M4 {
-        math::basis(self.ax, self.ey, self.ez, s, self.at(c))
-    }
-    /// Cylinder (mesh axis y) along frame x from `x0` to `x1` at frame (y, z), radius `r`, spun by `spin`.
-    fn rod(&self, x0: f32, x1: f32, y: f32, z: f32, r: f32, spin: f32) -> M4 {
-        let (s, c) = spin.sin_cos();
-        let px = math::add(math::scale(self.ey, c), math::scale(self.ez, s));
-        let pz = math::cross(px, self.ax);
-        math::basis(px, self.ax, pz, [2.0 * r, x1 - x0, 2.0 * r], self.at([0.5 * (x0 + x1), y, z]))
-    }
-    /// Unscaled mesh built along y from frame origin (the thread), spun by `spin`.
-    fn spun(&self, spin: f32) -> M4 {
-        let (s, c) = spin.sin_cos();
-        let px = math::add(math::scale(self.ey, c), math::scale(self.ez, s));
-        math::basis(px, self.ax, math::cross(px, self.ax), [1.0; 3], self.o)
-    }
-}
-
-/// Cylinder / cone mesh from `a` along unit `dir` with length `len` and radius `r` (mesh axis y).
-fn along(a: V, dir: V, len: f32, r: f32) -> M4 {
-    let helper = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
-    let x = math::norm(math::cross(helper, dir));
-    let z = math::cross(x, dir);
-    math::basis(x, dir, z, [2.0 * r, len, 2.0 * r], math::add(a, math::scale(dir, 0.5 * len)))
+/// Everything the scene needs for one frame.
+pub struct State<'a> {
+    pub mech: &'a Mech,
+    pub q: f64,
+    pub roll: f64,
+    pub act: &'a Inputs,
+    /// Min / max actuator length over the range (m), per actuator.
+    pub s_range: [(f64, f64); 2],
+    /// Required force exceeds available at this pose.
+    pub over: bool,
 }
 
 /// Helical thread ridge around a core of radius `r0` up to `r1`, along y from 0 to `len`,
@@ -98,136 +63,118 @@ pub fn thread(r0: f32, r1: f32, lead: f32, len: f32, w: f32) -> gl::Geo {
     g
 }
 
-/// Exaggerated first whirling mode shape (0…1) along ξ = x/L for each end support (approximate).
-pub fn mode_shape(s: Support, xi: f32) -> f32 {
-    match s {
-        Support::SimpleSimple => (PI * xi).sin(),
-        Support::FixedFixed => 0.5 * (1.0 - (TAU * xi).cos()),
-        Support::FixedFree => 1.0 - (0.5 * PI * xi).cos(),
-        Support::FixedSimple => 1.5 * xi.powf(0.7) * (PI * xi).sin(),
-    }
+/// Orthonormal frame with y along `dir` (mesh axis), x / z perpendicular, rotated by `spin`.
+fn axis_frame(dir: V, spin: f32) -> (V, V) {
+    let helper = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+    let x0 = math::norm(math::cross(helper, dir));
+    let z0 = math::cross(x0, dir);
+    let (s, c) = spin.sin_cos();
+    (math::add(math::scale(x0, c), math::scale(z0, s)), math::add(math::scale(z0, c), math::scale(x0, -s)))
 }
 
-pub struct Toggles {
-    pub color: bool,
-    pub arrows: bool,
-    pub whirl: bool,
+/// Cylinder from `a` along unit `dir`, length `len`, radius `r`, spun by `spin`.
+fn along(a: V, dir: V, len: f32, r: f32, spin: f32) -> M4 {
+    let (x, z) = axis_frame(dir, spin);
+    math::basis(x, dir, z, [2.0 * r, len, 2.0 * r], math::add(a, math::scale(dir, 0.5 * len)))
+}
+
+/// Box from `a` to `b` (length axis), thickness `t` along `normal` (made perpendicular), width `w`.
+fn bar(a: V, b: V, normal: V, w: f32, t: f32) -> M4 {
+    let d = math::sub(b, a);
+    let l = math::dot(d, d).sqrt().max(1e-6);
+    let x = math::scale(d, 1.0 / l);
+    let z = math::norm(math::sub(normal, math::scale(x, math::dot(normal, x))));
+    let y = math::cross(z, x);
+    math::basis(x, y, z, [l + w * 0.5, w, t], math::scale(math::add(a, b), 0.5))
+}
+
+fn knee_w(p: [f64; 2], z: f32) -> V {
+    [p[0] as f32, KNEE_H + p[1] as f32, z]
+}
+fn ank_w(p: [f64; 3]) -> V {
+    [p[0] as f32, ANK_H + p[2] as f32, -p[1] as f32]
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Pick {
+    None,
+    Handle,
 }
 
 pub struct Scene {
     pub r: Renderer,
     cyl: Mesh,
     cube: Mesh,
-    cone: Mesh,
+    sphere: Mesh,
     thread: Option<(Mesh, [u64; 3], f32)>,
     pub cam: OrbitCam,
+    /// 0 perspective, 1 side, 2 front.
     pub preset: u8,
-    lay: Layout,
+    handle: V,
     hover: Pick,
     drag: Pick,
     pointers: Vec<(i32, f32, f32)>,
     pinch: f32,
     inv_vp: M4,
     size: (f32, f32),
-}
-
-fn status_rgb(s: Status, margin: f64) -> [f32; 3] {
-    let (g, y, r) = ([0.30, 0.78, 0.40], [0.95, 0.78, 0.20], [0.92, 0.30, 0.25]);
-    match s {
-        Status::Fail => r,
-        _ => {
-            let t = ((margin - 1.0) as f32).clamp(0.0, 1.0);
-            [0, 1, 2].map(|i| y[i] + (g[i] - y[i]) * t)
-        }
-    }
+    ankle: bool,
 }
 
 impl Scene {
     pub fn new(r: Renderer) -> Option<Scene> {
-        let cone = gl::frustum([0.0, 0.5, 0.0], &[[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]);
         let mut s = Scene {
             cyl: r.mesh(&gl::cylinder(28))?,
             cube: r.mesh(&gl::cube())?,
-            cone: r.mesh(&cone)?,
+            sphere: r.mesh(&gl::sphere(16))?,
             r,
             thread: None,
-            cam: OrbitCam::new(Orbit { target: [0.0, 0.2, 0.0], yaw: 0.6, pitch: 0.35, dist: 1.0 }),
+            cam: OrbitCam::new(Orbit { target: [0.0, 0.4, 0.0], yaw: 0.7, pitch: 0.3, dist: 1.4 }),
             preset: 0,
-            lay: Layout::default(),
+            handle: [0.0; 3],
             hover: Pick::None,
             drag: Pick::None,
             pointers: vec![],
             pinch: 0.0,
             inv_vp: math::IDENTITY,
             size: (1.0, 1.0),
+            ankle: false,
         };
         s.r.cell = 0.05;
         s.r.fog = [2.5, 10.0];
         Some(s)
     }
 
-    fn preset_orbit(&self, inp: &Inputs) -> Orbit {
-        let l = (inp.length_mm as f32 / 1000.0).max(0.2);
-        let mid = self.lay.at([0.5 * self.lay.len, 0.0, 0.0]);
+    fn preset_orbit(&self, ankle: bool) -> Orbit {
+        let (target, dist) = if ankle { ([0.0, ANK_H + 0.12, 0.0], 0.85) } else { ([0.0, KNEE_H - 0.02, 0.0], 1.45) };
         match self.preset {
-            1 => Orbit { target: mid, yaw: 0.0, pitch: 1.5, dist: 1.5 * l + 0.2 },
-            2 => Orbit { target: mid, yaw: 0.0, pitch: 0.02, dist: 1.5 * l + 0.2 },
-            3 => Orbit { target: self.lay.carriage, yaw: 0.35, pitch: 0.25, dist: 0.35 + 0.1 * l },
-            _ => Orbit { target: mid, yaw: 0.6, pitch: 0.35, dist: 1.6 * l + 0.25 },
+            1 => Orbit { target, yaw: 0.0, pitch: 0.02, dist },
+            2 => Orbit { target, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.02, dist },
+            _ => Orbit { target, yaw: 0.75, pitch: 0.3, dist },
         }
     }
 
-    pub fn reset_view(&mut self, inp: &Inputs) {
-        let o = self.preset_orbit(inp);
+    pub fn reset_view(&mut self, mech: &Mech) {
+        let o = self.preset_orbit(matches!(mech.kind, Kind::Ankle(_)));
         self.cam.set_goal(o);
     }
 
-    /// Draw one frame. `pos` is the nut position along the stroke (m), `force` the axial force now.
-    pub fn frame(&mut self, w: i32, h: i32, dt: f32, inp: &Inputs, res: &Results, pos: f64, force: f64, tog: &Toggles, t: f64) {
+    fn screw_mesh(&mut self, inp: &Inputs, len: f32) -> f32 {
         let d = inp.d_mm as f32 / 1000.0;
-        let lead = inp.lead_mm as f32 / 1000.0;
-        let len = inp.length_mm as f32 / 1000.0;
-        let dr = res.dr_mm as f32 / 1000.0;
-        let lead_vis = lead.max(len / 120.0);
-        let key = [inp.d_mm.to_bits(), inp.lead_mm.to_bits(), inp.length_mm.to_bits()];
+        let lead_vis = (inp.lead_mm as f32 / 1000.0).max(len / 80.0);
+        let key = [inp.d_mm.to_bits(), (lead_vis as f64).to_bits(), (len as f64).to_bits()];
         if self.thread.as_ref().map(|t| t.1) != Some(key) {
             if let Some((m, _, _)) = self.thread.take() {
                 self.r.free(m);
             }
+            let dr = lm_core::root_diameter(inp.d_mm, inp.lead_mm) as f32 / 1000.0;
             let g = thread(0.5 * dr, 0.5 * d, lead_vis, len, (0.35 * lead_vis).min(0.25 * d));
             self.thread = self.r.mesh(&g).map(|m| (m, key, lead_vis));
         }
+        lead_vis
+    }
 
-        // Frame layout: x along the axis, y "up" in the tilt plane, z sideways.
-        let th = (inp.angle_deg as f32).to_radians();
-        let (sn, cs) = th.sin_cos();
-        let (ax, ey, ez) = ([cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]);
-        let ratio = inp.ratio as f32;
-        let belt = (ratio - 1.0).abs() > 0.01;
-        let mr = 0.022 + 0.012 * (inp.motor_torque as f32).sqrt().min(3.0);
-        let ml = 2.2 * mr + 0.03;
-        let hs = 0.5 * d + 0.02;
-        let base_y = -hs - 0.006;
-        let nut_len = 2.5 * d + 0.015;
-        let blk = 0.018 + 0.5 * d;
-        let x_start = blk * 2.2 + 0.5 * nut_len;
-        let x_end = (len - blk * 2.2 - 0.5 * nut_len).max(x_start);
-        let x_lo = if belt { -0.06 } else { -0.04 - ml };
-        let (y_lo, y_hi) = (base_y - 0.012, hs + 0.08);
-        let lift = [x_lo, len + 0.03].iter().flat_map(|x| [y_lo, y_hi].map(|y| x * sn + y * cs)).fold(f32::MAX, f32::min);
-        // Motor end anchored, so dragging the far support moves it 1:1 with the pointer.
-        let o = [-0.2 * cs, 0.005 - lift, 0.0];
-        let mut lay = Layout { o, ax, ey, ez, len, x_start, x_end, ..Layout::default() };
-        let xn = (x_start + pos as f32).clamp(x_start, x_end);
-        let carriage_c = [xn, hs + 0.03, 0.0];
-        lay.carriage = lay.at(carriage_c);
-        lay.end = lay.at([len, 0.0, 0.0]);
-        lay.pick_r = 0.05 + d;
-        self.lay = lay;
-
-        if self.preset == 3 && self.drag == Pick::None {
-            self.cam.goal.target = lay.carriage;
-        }
+    pub fn frame(&mut self, w: i32, h: i32, dt: f32, st: &State) {
+        self.ankle = matches!(st.mech.kind, Kind::Ankle(_));
         self.cam.step(dt);
         let eye = self.cam.cur.eye();
         let view = math::look_at(eye, self.cam.cur.target, [0.0, 1.0, 0.0]);
@@ -236,112 +183,177 @@ impl Scene {
         self.size = (w as f32, h as f32);
         self.r.begin(&view, &proj, eye, [0, 0, w, h]);
 
+        let dark = self.r.theme.shadow > 0.4;
+        let body = if dark { [0.62, 0.65, 0.70] } else { [0.78, 0.80, 0.84] };
+        let accent = [0.22, 0.45, 0.82];
+        let pin = [0.25, 0.27, 0.30];
         let steel = [0.72, 0.74, 0.78];
-        let worst = res.checks().iter().copied().max_by_key(|c| c.status).map(|c| (c.status, res.min_margin()));
-        let screw_rgb = match (tog.color, worst) {
-            (true, Some((s, m))) => status_rgb(s, m),
-            _ => steel,
+        let can = [0.16, 0.17, 0.19];
+        let red = [0.92, 0.30, 0.25];
+        let nut_rgb = if st.over { red } else {
+            match st.act.kind {
+                lm_core::Kind::TrapBronze => [0.80, 0.55, 0.25],
+                lm_core::Kind::TrapPom => [0.92, 0.92, 0.88],
+                _ => [0.30, 0.55, 0.40],
+            }
         };
         let rgba = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
-        let glow = |p: Pick| if self.hover == p || self.drag == p { 0.25 } else { 0.0 };
-        let spin = TAU * (xn - x_start) / lead_vis;
-        let mut parts: Vec<(&Mesh, M4, Paint)> = vec![];
         let lit = |c: [f32; 3]| Paint::lit(rgba(c));
+        let glow = if self.hover == Pick::Handle || self.drag == Pick::Handle { 0.3 } else { 0.0 };
+        // Collected as (mesh id, model, paint) so shadows and colours share the list.
+        let mut parts: Vec<(u8, M4, Paint)> = vec![];
+        const CYL: u8 = 0;
+        const CUBE: u8 = 1;
+        const SPH: u8 = 2;
+        const THR: u8 = 3;
+        let z = [0.0, 0.0, 1.0];
+        // Actuators to draw: (base pivot, rod end, actuator index).
+        let mut acts: Vec<(V, V, usize)> = vec![];
 
-        // Screw core + thread (spinning).
-        parts.push((&self.cyl, lay.rod(0.0, len, 0.0, 0.0, 0.5 * dr, spin), lit(screw_rgb)));
-        if let Some((m, _, _)) = &self.thread {
-            parts.push((m, lay.spun(spin), lit(screw_rgb)));
-        }
-        // Base beam.
-        let beam_x0 = x_lo;
-        parts.push((&self.cube, lay.boxm([0.5 * (beam_x0 + len + 0.03), base_y - 0.006, 0.0], [len + 0.03 - beam_x0, 0.012, 1.6 * d + 0.03]), lit([0.50, 0.52, 0.56])));
-        // End supports: fixed = two bearing blocks, simple = one; the far end is draggable.
-        let (fixed0, far) = inp.support.ends();
-        let block = |x: f32| lay.boxm([x, 0.5 * (base_y + 0.5 * d + 0.012), 0.0], [blk, 0.5 * d + 0.012 - base_y, d + 0.03]);
-        let sup = [0.33, 0.36, 0.42];
-        let n0 = if fixed0 { 2 } else { 1 };
-        for i in 0..n0 {
-            parts.push((&self.cube, block(0.5 * blk + 1.1 * blk * i as f32), lit(sup)));
-        }
-        if let Some(ff) = far {
-            let n1 = if ff { 2 } else { 1 };
-            for i in 0..n1 {
-                let mut p = lit(sup);
-                p.glow = glow(Pick::End);
-                parts.push((&self.cube, block(len - 0.5 * blk - 1.1 * blk * i as f32), p));
+        match st.mech.kind {
+            Kind::SliderCrank(_) | Kind::FourBar(_) => {
+                let q = st.q;
+                let (sq, cq) = (q.sin() as f32, q.cos() as f32);
+                let sd = [-sq, -cq, 0.0];
+                let knee = [0.0, KNEE_H, 0.0];
+                let tip = math::add(knee, math::scale(sd, SHANK));
+                // Fixture: stand post and arm holding the hip block (thigh is fixed).
+                let hip = [0.0, KNEE_H + THIGH, 0.0];
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.04, KNEE_H + THIGH + 0.03, 0.04], [-0.22, 0.5 * (KNEE_H + THIGH + 0.03), 0.0]), lit([0.40, 0.42, 0.46])));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.24, 0.035, 0.05], [-0.11, KNEE_H + THIGH, 0.0]), lit([0.40, 0.42, 0.46])));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.11, 0.05, 0.11], hip), lit(body)));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.40, 0.012, 0.30], [-0.12, 0.006, 0.0]), lit([0.40, 0.42, 0.46])));
+                // Thigh and shank: twin side plates around the actuator plane z = 0.
+                for zs in [0.045f32, -0.045] {
+                    parts.push((CUBE, bar([0.0, KNEE_H, zs], [0.0, KNEE_H + THIGH, zs], z, 0.075, 0.012), lit(body)));
+                    let mut sp = lit(accent);
+                    sp.glow = glow;
+                    let k = [0.0, KNEE_H, zs * 0.8];
+                    parts.push((CUBE, bar(k, math::add(k, math::scale(sd, SHANK)), z, 0.06, 0.012), sp));
+                }
+                parts.push((CYL, along([0.0, KNEE_H, -0.06], z, 0.12, 0.02, 0.0), lit(pin)));
+                // Foot under the shank tip (ankle neutral) — the drag handle.
+                let mut fp = lit(accent);
+                fp.glow = glow;
+                let foot_fwd = [cq, -sq, 0.0];
+                parts.push((CUBE, math::basis(foot_fwd, [-sd[0], -sd[1], 0.0], z, [0.20, 0.035, 0.09], math::add(tip, math::scale(foot_fwd, 0.04))), fp));
+                parts.push((SPH, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.05; 3], tip), fp));
+                self.handle = tip;
+                let (a, b) = match st.mech.kind {
+                    Kind::SliderCrank(m) => {
+                        let b = m.rod_end(q);
+                        parts.push((CUBE, bar(knee, knee_w(b, 0.0), z, 0.03, 0.014), lit(accent)));
+                        (knee_w(m.base(), 0.0), knee_w(b, 0.0))
+                    }
+                    Kind::FourBar(m) => match m.solve(q) {
+                        Some(p) => {
+                            let c = knee_w([m.cx, m.cy], 0.0);
+                            let (k, pp, b) = (knee_w(p.k, 0.0), knee_w(p.p, 0.0), knee_w(p.b, 0.0));
+                            parts.push((CUBE, bar(knee, b, z, 0.028, 0.014), lit(accent)));
+                            parts.push((CUBE, bar(c, k, z, 0.026, 0.016), lit([0.85, 0.55, 0.2])));
+                            parts.push((CUBE, bar(c, pp, z, 0.026, 0.016), lit([0.85, 0.55, 0.2])));
+                            parts.push((CUBE, bar(k, pp, z, 0.02, 0.012), lit([0.85, 0.55, 0.2])));
+                            parts.push((CUBE, bar(k, b, z, 0.018, 0.01), lit([0.55, 0.58, 0.62])));
+                            for pt in [c, k, b] {
+                                parts.push((CYL, along(math::add(pt, [0.0, 0.0, -0.05]), z, 0.1, 0.008, 0.0), lit(pin)));
+                            }
+                            (knee_w([m.ax, m.ay], 0.0), pp)
+                        }
+                        None => (knee_w([m.ax, m.ay], 0.0), knee_w([m.cx, m.cy], 0.0)),
+                    },
+                    Kind::Ankle(_) => unreachable!(),
+                };
+                for pt in [a, b] {
+                    parts.push((CYL, along(math::add(pt, [0.0, 0.0, -0.05]), z, 0.1, 0.007, 0.0), lit(pin)));
+                }
+                acts.push((a, b, 0));
             }
-        } else {
-            // Free end: just a small end cap marker for dragging.
-            let mut p = lit(sup);
-            p.glow = glow(Pick::End);
-            parts.push((&self.cyl, lay.rod(len, len + 0.006, 0.0, 0.0, 0.5 * d + 0.003, 0.0), p));
+            Kind::Ankle(an) => {
+                let (p, r) = (st.q, st.roll);
+                let ank = [0.0, ANK_H, 0.0];
+                // Shank post, upper bracket, fixture.
+                parts.push((CUBE, bar(ank, [0.0, ANK_H + SHANK, 0.0], [1.0, 0.0, 0.0], 0.05, 0.05), lit(body)));
+                let ub = ank_w([-an.c, 0.0, an.h]);
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [an.c as f32 + 0.03, 0.025, an.w as f32 + 0.03], [-0.5 * an.c as f32, ub[1], 0.0]), lit(body)));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.05, ANK_H + SHANK + 0.03, 0.05], [0.2, 0.5 * (ANK_H + SHANK + 0.03), 0.0]), lit([0.40, 0.42, 0.46])));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.2, 0.03, 0.05], [0.1, ANK_H + SHANK, 0.0]), lit([0.40, 0.42, 0.46])));
+                // Universal joint cross.
+                parts.push((CYL, along([0.0, ANK_H, -0.04], z, 0.08, 0.012, 0.0), lit(pin)));
+                let rx = ank_w(foot_rot(p, 0.0, [1.0, 0.0, 0.0]));
+                let rx = math::sub(rx, ank);
+                parts.push((CYL, along(math::sub(ank, math::scale(rx, 0.035)), rx, 0.07, 0.011, 0.0), lit(pin)));
+                // Foot plate in the foot frame.
+                let fr = |v: [f64; 3]| math::sub(ank_w(foot_rot(p, r, v)), ank);
+                let (fx, fy, fz) = (fr([1.0, 0.0, 0.0]), fr([0.0, 1.0, 0.0]), fr([0.0, 0.0, 1.0]));
+                let mut fp = lit(accent);
+                fp.glow = glow;
+                let centre = ank_w(foot_rot(p, r, [0.04, 0.0, -0.06]));
+                parts.push((CUBE, math::basis(fx, fz, fy, [0.25, 0.022, 0.10], centre), fp));
+                let toe = ank_w(foot_rot(p, r, [0.165, 0.0, -0.06]));
+                parts.push((SPH, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.045; 3], toe), fp));
+                self.handle = toe;
+                // Heel brackets from the lower pivots down to the plate; ankle post.
+                parts.push((CUBE, bar(ank, ank_w(foot_rot(p, r, [0.0, 0.0, -0.06])), fx, 0.03, 0.03), lit(body)));
+                for i in 0..2 {
+                    let lo = ank_w(an.lower(i, p, r));
+                    let pl = ank_w(foot_rot(p, r, sub_z(an.foot_local(i), 0.06)));
+                    parts.push((CUBE, bar(lo, pl, fx, 0.022, 0.014), lit(body)));
+                    let up = ank_w(an.upper(i));
+                    parts.push((SPH, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.018; 3], up), lit(pin)));
+                    parts.push((SPH, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.018; 3], lo), lit(pin)));
+                    acts.push((up, lo, i));
+                }
+            }
         }
-        // Nut + flange + carriage + payload.
-        let nut_rgb = match inp.kind {
-            Kind::TrapBronze => [0.80, 0.55, 0.25],
-            Kind::TrapPom => [0.92, 0.92, 0.88],
-            _ => [0.30, 0.32, 0.36],
+
+        // Actuators: motor can at the base pivot, screw, nut at s − rod length, rod to the rod end.
+        let d = (st.act.d_mm as f32 / 1000.0).clamp(0.006, 0.04);
+        let nut = (lm_core::couple::nut_length_m(st.act.d_mm) as f32).min(0.08);
+        let stroke = acts.iter().map(|a| (st.s_range[a.2].1 - st.s_range[a.2].0) as f32).fold(0.0, f32::max).max(0.005);
+        let screw_len = stroke + nut;
+        let lead_vis = self.screw_mesh(st.act, screw_len);
+        let mut thread_parts: Vec<M4> = vec![];
+        for &(a, b, i) in &acts {
+            let dv = math::sub(b, a);
+            let s = math::dot(dv, dv).sqrt().max(1e-4);
+            let dir = math::scale(dv, 1.0 / s);
+            let (s_min, s_max) = (st.s_range[i].0 as f32, st.s_range[i].1 as f32);
+            let mr = (0.5 * d + 0.012).max(0.018);
+            let m_len = (0.25 * s_min).clamp(0.02, 0.06);
+            let rod_len = (s_max - m_len - screw_len + 0.5 * nut).max(0.01);
+            let xn = (s - rod_len).clamp(m_len + 0.5 * nut, m_len + screw_len - 0.5 * nut);
+            let spin = TAU * (s - s_min) / lead_vis;
+            parts.push((CYL, along(a, dir, m_len, mr, 0.0), lit(can)));
+            parts.push((CYL, along(math::add(a, math::scale(dir, m_len - 0.004)), dir, 0.004, mr + 0.003, 0.0), lit(if st.over { red } else { [0.3, 0.3, 0.32] })));
+            let s0 = math::add(a, math::scale(dir, m_len));
+            parts.push((CYL, along(s0, dir, screw_len, 0.5 * lm_core::root_diameter(st.act.d_mm, st.act.lead_mm) as f32 / 1000.0, spin), lit(if st.over { red } else { steel })));
+            let (x, zz) = axis_frame(dir, spin);
+            thread_parts.push(math::basis(x, dir, zz, [1.0; 3], s0));
+            parts.push((CYL, along(math::add(a, math::scale(dir, xn - 0.5 * nut)), dir, nut, 0.5 * d + 0.007, 0.0), lit(nut_rgb)));
+            parts.push((CYL, along(math::add(a, math::scale(dir, xn)), dir, s - xn, 0.25 * d + 0.002, 0.0), lit(steel)));
+            parts.push((SPH, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.016; 3], b), lit(pin)));
+        }
+        let thread_rgb = if st.over { red } else { steel };
+        for m in thread_parts {
+            parts.push((THR, m, lit(thread_rgb)));
+        }
+
+        let mesh = |id: u8| -> Option<&Mesh> {
+            match id {
+                CYL => Some(&self.cyl),
+                CUBE => Some(&self.cube),
+                SPH => Some(&self.sphere),
+                _ => self.thread.as_ref().map(|t| &t.0),
+            }
         };
-        parts.push((&self.cyl, lay.rod(xn - 0.5 * nut_len, xn + 0.5 * nut_len, 0.0, 0.0, 0.5 * d + 0.008, 0.0), lit(nut_rgb)));
-        parts.push((&self.cyl, lay.rod(xn - 0.5 * nut_len, xn - 0.5 * nut_len + 0.006, 0.0, 0.0, 0.5 * d + 0.02, 0.0), lit(nut_rgb)));
-        let mut car = lit([0.22, 0.45, 0.82]);
-        car.glow = glow(Pick::Carriage);
-        parts.push((&self.cube, lay.boxm([xn, 0.5 * d + 0.014, 0.0], [nut_len + 0.01, 0.012, 2.4 * d + 0.05]), car));
-        let pay = (inp.mass_kg as f32).cbrt() * 0.02 + 0.02;
-        parts.push((&self.cube, lay.boxm([xn, 0.5 * d + 0.02 + 0.5 * pay, 0.0], [pay, pay, pay]), car));
-        // Motor: inline with coupling, or folded alongside with belt pulleys.
-        let can = [0.16, 0.17, 0.19];
-        if belt {
-            let rp_m = 0.012f32;
-            let rp_s = (rp_m * ratio).clamp(0.006, 0.05);
-            let zm = -(rp_s + rp_m + 0.025);
-            let xp = -0.03;
-            parts.push((&self.cyl, lay.rod(xp - 0.006, xp + 0.006, 0.0, 0.0, rp_s, spin), lit([0.6, 0.6, 0.62])));
-            parts.push((&self.cyl, lay.rod(xp - 0.006, xp + 0.006, 0.0, zm, rp_m, spin * ratio), lit([0.6, 0.6, 0.62])));
-            parts.push((&self.cyl, lay.rod(xp, 0.0, 0.0, 0.0, 0.3 * d, 0.0), lit(steel)));
-            parts.push((&self.cyl, lay.rod(xp + 0.008, xp + 0.008 + ml, 0.0, zm, mr, 0.0), lit(can)));
-            for sgn in [1.0, -1.0] {
-                let (a, b) = (lay.at([xp, sgn * rp_s, 0.0]), lay.at([xp, sgn * rp_m, zm]));
-                let dv = math::sub(b, a);
-                let l = math::dot(dv, dv).sqrt();
-                parts.push((&self.cyl, along(a, math::norm(dv), l, 0.0025), lit([0.1, 0.1, 0.1])));
-            }
-        } else {
-            parts.push((&self.cyl, lay.rod(-0.03, 0.0, 0.0, 0.0, 0.3 * d + 0.004, spin), lit(steel)));
-            parts.push((&self.cyl, lay.rod(-0.04 - ml, -0.03, 0.0, 0.0, mr, 0.0), lit(can)));
-        }
-
-        for (m, model, _) in &parts {
-            self.r.shadow(m, model);
-        }
-        for (m, model, p) in &parts {
-            self.r.draw(m, model, *p);
-        }
-
-        // Force arrows: thrust on the nut along the axis, gravity on the payload.
-        if tog.arrows {
-            let fs = 0.25 / res.f_peak.max(1.0) as f32;
-            let g = (inp.mass_kg * lm_core::G) as f32;
-            let thrust_dir = if force >= 0.0 { ax } else { math::scale(ax, -1.0) };
-            let arrows = [
-                (lay.at([xn, 0.0, 0.5 * d + 0.03]), thrust_dir, (force.abs() as f32 * fs).max(0.01), [0.2, 0.75, 0.95]),
-                (lay.at([xn, 0.5 * d + 0.02 + 0.5 * pay, 0.5 * pay + 0.02]), [0.0, -1.0, 0.0], (g * fs).max(0.01), [0.95, 0.45, 0.2]),
-            ];
-            for (a, dir, l, c) in arrows {
-                let head = 0.025f32.min(0.5 * l);
-                self.r.draw(&self.cyl, &along(a, dir, l - head, 0.003), Paint::flat(rgba(c)));
-                self.r.draw(&self.cone, &along(math::add(a, math::scale(dir, l - head)), dir, head, 0.008), Paint::flat(rgba(c)));
+        for (id, model, _) in &parts {
+            if let Some(m) = mesh(*id) {
+                self.r.shadow(m, model);
             }
         }
-        // Whirl ghost: exaggerated first-mode shape when running above 80 % of critical speed.
-        if tog.whirl && res.screw_rpm > 0.8 * res.n_crit {
-            let amp = 0.06 * len * (t as f32 * 9.0).sin();
-            let n = 24;
-            for i in 0..n {
-                let (x0, x1) = (len * i as f32 / n as f32, len * (i + 1) as f32 / n as f32);
-                let y = amp * mode_shape(inp.support, (i as f32 + 0.5) / n as f32);
-                self.r.draw(&self.cyl, &lay.rod(x0, x1, y, 0.0, 0.5 * d + 0.002, 0.0), Paint::lit([0.95, 0.3, 0.25, 0.35]));
+        for (id, model, p) in &parts {
+            if let Some(m) = mesh(*id) {
+                self.r.draw(m, model, *p);
             }
         }
     }
@@ -352,23 +364,7 @@ impl Scene {
 
     fn pick(&self, x: f32, y: f32) -> Pick {
         let (o, d) = self.ray(x, y);
-        let hc = math::ray_sphere(o, d, self.lay.carriage, self.lay.pick_r);
-        let he = math::ray_sphere(o, d, self.lay.end, self.lay.pick_r);
-        match (hc, he) {
-            (Some(a), Some(b)) => if a <= b { Pick::Carriage } else { Pick::End },
-            (Some(_), None) => Pick::Carriage,
-            (None, Some(_)) => Pick::End,
-            _ => Pick::None,
-        }
-    }
-
-    /// Axial frame coordinate (m) under the pointer, on the plane through the axis facing the camera.
-    fn axial(&self, x: f32, y: f32) -> Option<f32> {
-        let (o, d) = self.ray(x, y);
-        let ax = self.lay.ax;
-        let n = math::norm(math::sub(d, math::scale(ax, math::dot(d, ax))));
-        let p = math::ray_plane(o, d, self.lay.o, n)?;
-        Some(math::dot(math::sub(p, self.lay.o), ax))
+        if math::ray_sphere(o, d, self.handle, 0.06).is_some() { Pick::Handle } else { Pick::None }
     }
 
     pub fn down(&mut self, id: i32, x: f32, y: f32) {
@@ -399,7 +395,7 @@ impl Scene {
         self.cam.pan(math::add(math::scale(right, -dx * k), math::scale(up, dy * k)));
     }
 
-    /// Pointer move; `buttons` is the MouseEvent buttons mask. Returns a model change, if any.
+    /// Pointer move; `buttons` is the MouseEvent buttons mask. Returns a joint change, if any.
     pub fn moved(&mut self, id: i32, x: f32, y: f32, buttons: u16) -> (Option<Action>, &'static str) {
         let Some(i) = self.pointers.iter().position(|p| p.0 == id) else {
             self.hover = self.pick(x, y);
@@ -417,8 +413,15 @@ impl Scene {
             return (None, "default");
         }
         let act = match self.drag {
-            Pick::Carriage => self.axial(x, y).map(|a| Action::Scrub(((a - self.lay.x_start).max(0.0)) as f64)),
-            Pick::End => self.axial(x, y).map(|a| Action::Length((a * 1000.0).clamp(50.0, 3000.0).round() as f64)),
+            Pick::Handle if self.ankle => Some(Action::Ankle(dy as f64 * 0.25, -dx as f64 * 0.25)),
+            Pick::Handle => {
+                // Point under the pointer on the sagittal plane z = 0, angle of knee → point.
+                let (o, d) = self.ray(x, y);
+                math::ray_plane(o, d, [0.0, KNEE_H, 0.0], [0.0, 0.0, 1.0]).map(|p| {
+                    let (px, py) = (p[0], p[1] - KNEE_H);
+                    Action::Knee((-px).atan2(-py).to_degrees() as f64)
+                })
+            }
             Pick::None => {
                 if buttons & 2 != 0 {
                     self.pan(dx, dy);
@@ -438,11 +441,10 @@ impl Scene {
             self.cam.held = false;
         }
     }
+}
 
-    /// Visual travel range along the axis (m), for mapping a scrub to the stroke.
-    pub fn travel(&self) -> f32 {
-        self.lay.x_end - self.lay.x_start
-    }
+fn sub_z(v: [f64; 3], dz: f64) -> [f64; 3] {
+    [v[0], v[1], v[2] - dz]
 }
 
 #[cfg(test)]
@@ -458,10 +460,21 @@ mod tests {
     }
 
     #[test]
-    fn mode_shapes_vanish_at_supports() {
-        for s in [Support::SimpleSimple, Support::FixedFixed, Support::FixedSimple] {
-            assert!(mode_shape(s, 0.0).abs() < 1e-6 && mode_shape(s, 1.0).abs() < 1e-5);
+    fn axis_frame_is_orthonormal() {
+        for dir in [[0.0, 1.0, 0.0], math::norm([0.3, -0.2, 0.9])] {
+            let (x, z) = axis_frame(dir, 0.7);
+            for (a, b) in [(x, dir), (z, dir), (x, z)] {
+                assert!(math::dot(a, b).abs() < 1e-5);
+            }
+            assert!((math::dot(x, x) - 1.0).abs() < 1e-5 && (math::dot(z, z) - 1.0).abs() < 1e-5);
         }
-        assert!(mode_shape(Support::FixedFree, 0.0).abs() < 1e-6 && mode_shape(Support::FixedFree, 1.0) > 0.99);
+    }
+
+    #[test]
+    fn world_mappings_keep_knee_and_ankle_axes() {
+        assert_eq!(knee_w([0.0, 0.0], 0.0), [0.0, KNEE_H, 0.0]);
+        // Ankle frame (x fwd, y left, z up) → world (x, y up, z = −left), right-handed.
+        assert_eq!(ank_w([0.0, 1.0, 0.0]), [0.0, ANK_H, -1.0]);
+        assert_eq!(ank_w([0.0, 0.0, 1.0]), [0.0, ANK_H + 1.0, 0.0]);
     }
 }
