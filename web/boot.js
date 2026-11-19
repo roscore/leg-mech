@@ -1,2 +1,2 @@
-import init from './sd_web.js';
+import init from './lm_web.js';
 init();

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'">
 <title>leg-mech</title>
-<link data-trunk rel="rust" href="crates/sd_web" data-wasm-opt="z">
+<link data-trunk rel="rust" href="crates/lm_web" data-wasm-opt="z">
 <link data-trunk rel="copy-file" href="web/boot.js">
 <style>
 :root { --bg:#f4f5f7; --fg:#1d2128; --mut:#5b6472; --card:#fff; --line:#d5d9e0; --acc:#2f6fdb; --ok:#1f9d55; --warn:#c98a00; --fail:#d33a2c; }
@@ -26,10 +26,11 @@ label { display:grid; grid-template-columns:1fr 110px; align-items:center; gap:6
 input, select, button { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:3px 6px; min-width:0; }
 button { cursor:pointer; }
 button.on { background:var(--acc); color:#fff; border-color:var(--acc); }
-#view-wrap { position:relative; height:440px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:#000; }
+#view-wrap { position:relative; height:460px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:#000; }
 #view { width:100%; height:100%; display:block; touch-action:none; }
 #hud { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.55); color:#fff; border-radius:6px; padding:6px 8px; font:12px/1.45 ui-monospace, monospace; pointer-events:none; }
 #hud b { font-weight:600; }
+#hud .ok { color:#5be08f; } #hud .warn { color:#ffd166; } #hud .fail { color:#ff7b6b; }
 #tools { position:absolute; z-index:1; right:8px; top:8px; display:flex; flex-wrap:wrap; gap:4px; justify-content:flex-end; max-width:60%; }
 #tools button, #tools select { background:rgba(0,0,0,.55); color:#fff; border-color:rgba(255,255,255,.3); font-size:12px; }
 #tools button.on { background:var(--acc); }
@@ -43,6 +44,14 @@ table { width:100%; border-collapse:collapse; font-size:13px; }
 td, th { padding:3px 6px; border-bottom:1px solid var(--line); text-align:right; }
 th:first-child, td:first-child { text-align:left; }
 #hits tr { cursor:pointer; }
+#cmp th[data-c], #cmp td[data-c] { cursor:pointer; }
+#cmp .active { background:color-mix(in srgb, var(--acc) 14%, transparent); }
+#cmp th { font-weight:600; white-space:nowrap; }
+.sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+.approx { color:var(--warn); font-size:12px; margin:2px 0 4px; }
+#flags { font-size:12px; color:var(--mut); margin-top:6px; }
+.sliders { display:grid; grid-template-columns:auto 1fr; gap:4px 8px; align-items:center; margin-top:6px; font-size:13px; }
+.row-btns { display:flex; gap:6px; margin-top:6px; }
 #hits tr:hover { background:var(--bg); }
 .ok { color:var(--ok); } .warn { color:var(--warn); } .fail { color:var(--fail); }
 #results td:last-child { font-weight:600; }
@@ -53,48 +62,62 @@ h2 { font-size:14px; margin:0 0 6px; }
 <body>
 <header>
   <h1>leg-mech</h1>
-  <span class="sub" data-en="Ball / roller / lead screw actuator sizer for robot joints" data-ko="로봇 관절용 볼 / 롤러 / 리드 스크루 액추에이터 사이징">Ball / roller / lead screw actuator sizer for robot joints</span>
+  <span class="sub" data-en="Humanoid knee / ankle linkage planner with screw-actuator comparison" data-ko="휴머노이드 무릎 / 발목 링크 설계와 스크루 액추에이터 비교">Humanoid knee / ankle linkage planner with screw-actuator comparison</span>
   <button id="lang">한국어</button>
 </header>
 <main>
 <section class="card" id="inputs">
-  <fieldset><legend data-en="Screw" data-ko="스크루">Screw</legend>
-    <label><span data-en="Type" data-ko="종류">Type</span><select id="kind">
+  <fieldset><legend data-en="Mechanism" data-ko="기구">Mechanism</legend>
+    <label><span data-en="Preset" data-ko="프리셋">Preset</span><select id="preset">
+      <option value="0" data-en="Optimus-style knee (slider-crank)" data-ko="Optimus 스타일 무릎 (슬라이더-크랭크)">Optimus-style knee (slider-crank)</option>
+      <option value="1" data-en="Optimus-style dual-rod ankle" data-ko="Optimus 스타일 듀얼 로드 발목">Optimus-style dual-rod ankle</option>
+      <option value="2" data-en="Generic four-bar knee" data-ko="일반 4절 링크 무릎">Generic four-bar knee</option>
+      <option value="3" data-en="Generic dual-rod ankle (humanoid)" data-ko="일반 듀얼 로드 발목 (휴머노이드)">Generic dual-rod ankle (humanoid)</option>
+    </select></label>
+    <p class="approx" data-en="approx., for comparison — edit to your design" data-ko="근사값, 비교용 — 설계에 맞게 수정하세요">approx., for comparison — edit to your design</p>
+    <div id="geo"></div>
+    <label><span data-en="Range min (°)" data-ko="범위 최소 (°)">Range min (°)</span><input id="qmin" type="number" step="1"></label>
+    <label><span data-en="Range max (°)" data-ko="범위 최대 (°)">Range max (°)</span><input id="qmax" type="number" step="1"></label>
+    <label id="rollr-row"><span data-en="Roll range ± (°)" data-ko="롤 범위 ± (°)">Roll range ± (°)</span><input id="rollr" type="number" step="1" min="1" max="60"></label>
+  </fieldset>
+  <fieldset><legend data-en="Load case" data-ko="부하 조건">Load case</legend>
+    <p class="note" data-en="τ_req(q) = τ0 + m·g·L·cos(q + offset)" data-ko="τ_req(q) = τ0 + m·g·L·cos(q + 오프셋)">τ_req(q) = τ0 + m·g·L·cos(q + offset)</p>
+    <label><span data-en="Constant torque τ0 (N·m)" data-ko="상수 토크 τ0 (N·m)">Constant torque τ0 (N·m)</span><input id="tau0" type="number" step="1"></label>
+    <label><span data-en="Body-mass share m (kg)" data-ko="체중 분담 m (kg)">Body-mass share m (kg)</span><input id="mass" type="number" step="1" min="0"></label>
+    <label><span data-en="Lever L (mm)" data-ko="레버 L (mm)">Lever L (mm)</span><input id="lcom" type="number" step="5"></label>
+    <label><span data-en="Offset (°)" data-ko="오프셋 (°)">Offset (°)</span><input id="offset" type="number" step="5"></label>
+    <label><span data-en="Target joint speed (°/s)" data-ko="목표 관절 속도 (°/s)">Target joint speed (°/s)</span><input id="speed" type="number" step="10" min="1"></label>
+    <label id="rolltau-row"><span data-en="Roll torque needed (N·m)" data-ko="필요 롤 토크 (N·m)">Roll torque needed (N·m)</span><input id="rolltau" type="number" step="1" min="0"></label>
+    <label><span data-en="Sweeps per day" data-ko="일일 스윕 횟수">Sweeps per day</span><input id="cpd" type="number" step="100" min="0"></label>
+    <label><span data-en="Target life (years)" data-ko="목표 수명 (년)">Target life (years)</span><input id="years" type="number" step="0.5" min="0.1"></label>
+  </fieldset>
+  <fieldset><legend id="edit-title">Actuator A</legend>
+    <label><span data-en="Screw type" data-ko="스크루 종류">Screw type</span><select id="kind">
       <option value="0" data-en="ball screw (typical)" data-ko="볼 스크루 (일반값)">ball screw (typical)</option>
       <option value="1" data-en="planetary roller screw (typical)" data-ko="유성 롤러 스크루 (일반값)">planetary roller screw (typical)</option>
       <option value="2" data-en="trapezoidal, bronze nut (typical)" data-ko="사다리꼴, 청동 너트 (일반값)">trapezoidal, bronze nut (typical)</option>
       <option value="3" data-en="trapezoidal, POM nut (typical)" data-ko="사다리꼴, POM 너트 (일반값)">trapezoidal, POM nut (typical)</option>
     </select></label>
-    <label><span data-en="Diameter d (mm)" data-ko="호칭경 d (mm)">Diameter d (mm)</span><input id="d" type="number" min="6" max="40" step="1"></label>
-    <label><span data-en="Lead l (mm)" data-ko="리드 l (mm)">Lead l (mm)</span><input id="lead" type="number" min="1" max="40" step="1"></label>
-    <label><span data-en="Length between supports L (mm)" data-ko="지지 간 길이 L (mm)">Length between supports L (mm)</span><input id="len" type="number" min="50" max="3000" step="10"></label>
+    <label><span data-en="Diameter d (mm)" data-ko="호칭경 d (mm)">Diameter d (mm)</span><input id="d" type="number" min="4" max="40" step="1"></label>
+    <label><span data-en="Lead l (mm)" data-ko="리드 l (mm)">Lead l (mm)</span><input id="lead" type="number" min="0.5" max="40" step="0.5"></label>
+    <label><span data-en="Screw length L (mm)" data-ko="스크루 길이 L (mm)">Screw length L (mm)</span><input id="len" type="number" min="20" max="2000" step="5"></label>
     <label><span data-en="End supports" data-ko="지지 방식">End supports</span><select id="support">
       <option value="0" data-en="fixed – free" data-ko="고정 – 자유">fixed – free</option>
       <option value="1" data-en="fixed – simple" data-ko="고정 – 단순">fixed – simple</option>
-      <option value="2" data-en="simple – simple" data-ko="단순 – 단순">simple – simple</option>
+      <option value="2" data-en="pinned – pinned" data-ko="핀 – 핀">pinned – pinned</option>
       <option value="3" data-en="fixed – fixed" data-ko="고정 – 고정">fixed – fixed</option>
     </select></label>
     <label><span data-en="Dynamic load rating Ca (kN)" data-ko="동정격하중 Ca (kN)">Dynamic load rating Ca (kN)</span><input id="ca" type="number" min="0.1" step="0.1"></label>
+    <label><span data-en="Force class" data-ko="추력 등급">Force class</span><select id="fclass">
+      <option value="0" data-en="custom" data-ko="직접 입력">custom</option>
+      <option value="1">≈ 500 N</option>
+      <option value="2">≈ 3.9 kN</option>
+      <option value="3">≈ 8 kN</option>
+    </select></label>
+    <label><span data-en="Motor torque (N·m)" data-ko="모터 토크 (N·m)">Motor torque (N·m)</span><input id="mt" type="number" min="0.01" step="0.05"></label>
+    <label><span data-en="Motor max speed (rpm)" data-ko="모터 최대 속도 (rpm)">Motor max speed (rpm)</span><input id="mrpm" type="number" min="10" step="100"></label>
+    <label><span data-en="Belt / gear ratio" data-ko="벨트 / 기어비">Belt / gear ratio</span><input id="ratio" type="number" min="0.2" max="50" step="0.1"></label>
   </fieldset>
-  <fieldset><legend data-en="Motor" data-ko="모터">Motor</legend>
-    <label><span data-en="Torque (N·m)" data-ko="토크 (N·m)">Torque (N·m)</span><input id="mt" type="number" min="0.01" step="0.05"></label>
-    <label><span data-en="Max speed (rpm)" data-ko="최대 속도 (rpm)">Max speed (rpm)</span><input id="mrpm" type="number" min="10" step="100"></label>
-    <label><span data-en="Belt / gear ratio" data-ko="벨트 / 기어비">Belt / gear ratio</span><input id="ratio" type="number" min="0.2" max="10" step="0.1"></label>
-  </fieldset>
-  <fieldset><legend data-en="Load and move" data-ko="부하와 동작">Load and move</legend>
-    <label><span data-en="Moving mass (kg)" data-ko="이동 질량 (kg)">Moving mass (kg)</span><input id="mass" type="number" min="0" step="1"></label>
-    <label><span data-en="Axis angle (°, 90 = vertical)" data-ko="축 각도 (°, 90 = 수직)">Axis angle (°, 90 = vertical)</span><input id="angle" type="number" min="0" max="90" step="5"></label>
-    <label><span data-en="External force (N)" data-ko="외력 (N)">External force (N)</span><input id="fext" type="number" step="10"></label>
-    <label><span data-en="Stroke (mm)" data-ko="스트로크 (mm)">Stroke (mm)</span><input id="stroke" type="number" min="1" step="10"></label>
-    <label><span data-en="Target speed (mm/s)" data-ko="목표 속도 (mm/s)">Target speed (mm/s)</span><input id="vmax" type="number" min="1" step="10"></label>
-    <label><span data-en="Acceleration (m/s²)" data-ko="가속도 (m/s²)">Acceleration (m/s²)</span><input id="acc" type="number" min="0.01" step="0.1"></label>
-  </fieldset>
-  <fieldset><legend data-en="Duty cycle" data-ko="사용 조건">Duty cycle</legend>
-    <label><span data-en="Cycles per day" data-ko="일일 사이클">Cycles per day</span><input id="cpd" type="number" min="0" step="100"></label>
-    <label><span data-en="Target life (years)" data-ko="목표 수명 (년)">Target life (years)</span><input id="years" type="number" min="0.1" step="0.5"></label>
-  </fieldset>
-  <h2 data-en="Results" data-ko="결과">Results</h2>
-  <table id="results"></table>
 </section>
 <section>
   <div id="view-wrap">
@@ -103,36 +126,35 @@ h2 { font-size:14px; margin:0 0 6px; }
     <div id="tools">
       <select id="cam">
         <option value="0" data-en="Perspective" data-ko="원근">Perspective</option>
-        <option value="1" data-en="Top" data-ko="위">Top</option>
-        <option value="2" data-en="Side" data-ko="옆">Side</option>
-        <option value="3" data-en="Nut-follow" data-ko="너트 추적">Nut-follow</option>
+        <option value="1" data-en="Side" data-ko="옆">Side</option>
+        <option value="2" data-en="Front" data-ko="앞">Front</option>
       </select>
-      <button id="t-color" class="on" data-en="Check colours" data-ko="판정 색">Check colours</button>
-      <button id="t-arrows" class="on" data-en="Forces" data-ko="힘">Forces</button>
-      <button id="t-whirl" class="on" data-en="Whirl ghost" data-ko="휘돌림">Whirl ghost</button>
-      <button id="t-play" class="on">Pause</button>
+      <button id="play">Play squat</button>
     </div>
     <div id="nogl" data-en="WebGL2 is not available — numbers and plots still work." data-ko="WebGL2를 사용할 수 없습니다 — 수치와 그래프는 계속 동작합니다.">WebGL2 is not available — numbers and plots still work.</div>
   </div>
-  <div id="timebar">
-    <select id="slow">
-      <option value="1">1×</option>
-      <option value="0.25" selected>0.25×</option>
-      <option value="0.1">0.1×</option>
-    </select>
-    <input id="time" type="range" min="0" max="1000" value="0">
-    <span id="tlabel" class="note"></span>
+  <div class="sliders">
+    <span id="qlabel">q</span><input id="q" type="range" min="0" max="120" step="0.5" value="45">
+    <span id="roll-wrap-l"></span><span id="roll-wrap"><input id="roll" type="range" min="-20" max="20" step="0.5" value="0" style="width:100%"></span>
   </div>
-  <p class="note" data-en="Drag: orbit · right drag / two fingers: pan · wheel / pinch: zoom · double-click: reset · drag the carriage to scrub, the far support to change L." data-ko="드래그: 회전 · 우클릭 드래그 / 두 손가락: 이동 · 휠 / 핀치: 확대 · 더블클릭: 초기화 · 캐리지를 끌어 시간 이동, 끝 지지부를 끌어 L 변경.">Drag: orbit · right drag / two fingers: pan · wheel / pinch: zoom · double-click: reset · drag the carriage to scrub, the far support to change L.</p>
+  <p class="note" data-en="Drag the foot (blue) to set the joint · drag: orbit · right drag / two fingers: pan · wheel / pinch: zoom · double-click: reset. The actuator turns red where the required force exceeds what it can give." data-ko="파란 발을 끌어 관절 각도 설정 · 드래그: 회전 · 우클릭 드래그 / 두 손가락: 이동 · 휠 / 핀치: 확대 · 더블클릭: 초기화. 필요 하중이 가용 추력을 넘으면 액추에이터가 빨갛게 변합니다.">Drag the foot (blue) to set the joint · drag: orbit · right drag / two fingers: pan · wheel / pinch: zoom · double-click: reset. The actuator turns red where the required force exceeds what it can give.</p>
+  <div class="card">
+    <h2 data-en="Compare actuators on this mechanism (click a column to edit it)" data-ko="이 기구에서 액추에이터 비교 (열을 클릭해 편집)">Compare actuators on this mechanism (click a column to edit it)</h2>
+    <div style="overflow-x:auto"><table id="cmp"></table></div>
+    <div class="row-btns"><button id="add" data-en="+ Add (copy of selected)" data-ko="+ 추가 (선택 항목 복사)">+ Add (copy of selected)</button><button id="del" data-en="Remove selected" data-ko="선택 항목 삭제">Remove selected</button></div>
+    <div id="flags"></div>
+  </div>
   <div class="plots">
-    <div class="card"><h2 data-en="Force – speed envelope" data-ko="힘 – 속도 영역">Force – speed envelope</h2><canvas class="plot" id="p-env"></canvas></div>
-    <div class="card"><h2 data-en="Move: position / speed / thrust" data-ko="동작: 위치 / 속도 / 추력">Move: position / speed / thrust</h2><canvas class="plot" id="p-time"></canvas></div>
+    <div class="card"><h2 data-en="Joint torque: available vs required" data-ko="관절 토크: 가용 vs 요구">Joint torque: available vs required</h2><canvas class="plot" id="p-tau"></canvas></div>
+    <div class="card"><h2 data-en="Max joint speed ω_max(q)" data-ko="최대 관절 속도 ω_max(q)">Max joint speed ω_max(q)</h2><canvas class="plot" id="p-speed"></canvas></div>
+    <div class="card"><h2 data-en="Moment arm and transmission angle" data-ko="모멘트 암과 전달각">Moment arm and transmission angle</h2><canvas class="plot" id="p-geo"></canvas></div>
+    <div class="card" id="ws-card"><h2 data-en="Ankle pitch–roll workspace (selected actuator)" data-ko="발목 피치–롤 작업 영역 (선택 액추에이터)">Ankle pitch–roll workspace (selected actuator)</h2><canvas class="plot" id="p-ws"></canvas></div>
   </div>
   <div class="card" style="margin-top:12px">
-    <h2><span data-en="Find screws" data-ko="스크루 찾기">Find screws</span> <button id="find" data-en="Search" data-ko="검색">Search</button></h2>
-    <table><thead><tr><th>d × l</th><th data-en="Torque margin" data-ko="토크 여유">Torque margin</th><th data-en="Min SF" data-ko="최소 SF">Min SF</th><th data-en="Life (y)" data-ko="수명 (년)">Life (y)</th><th data-en="Motor rpm" data-ko="모터 rpm">Motor rpm</th></tr></thead><tbody id="hits"></tbody></table>
+    <h2><span data-en="Find actuator (selected type and motor, scored by min torque margin)" data-ko="액추에이터 찾기 (선택한 종류·모터, 최소 토크 여유 기준)">Find actuator (selected type and motor, scored by min torque margin)</span> <button id="find" data-en="Search" data-ko="검색">Search</button></h2>
+    <table><thead><tr><th>d × l</th><th data-en="Min margin" data-ko="최소 여유">Min margin</th><th data-en="Peak force" data-ko="최대 하중">Peak force</th><th data-en="Buckling SF" data-ko="좌굴 SF">Buckling SF</th><th data-en="L10 (y)" data-ko="L10 (년)">L10 (y)</th><th data-en="Sweep time" data-ko="스윕 시간">Sweep time</th></tr></thead><tbody id="hits"></tbody></table>
   </div>
-  <p class="note" data-en="Educational estimates with generic typical values — validate with the screw maker's data and real tests before trusting a robot with it." data-ko="일반적인 값을 사용한 교육용 추정치입니다 — 로봇에 적용하기 전에 스크루 제조사 데이터와 실제 시험으로 검증하세요.">Educational estimates with generic typical values — validate with the screw maker's data and real tests before trusting a robot with it.</p>
+  <p class="note" data-en="Educational estimates: textbook kinematics and generic typical screw values. Presets are approximate, for comparison — edit to your design and validate with real data and tests." data-ko="교육용 추정치: 교과서 기구학과 일반적인 스크루 값. 프리셋은 비교용 근사값입니다 — 설계에 맞게 수정하고 실제 데이터와 시험으로 검증하세요.">Educational estimates: textbook kinematics and generic typical screw values. Presets are approximate, for comparison — edit to your design and validate with real data and tests.</p>
 </section>
 </main>
 </body>
