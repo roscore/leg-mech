@@ -1,5 +1,5 @@
 [package]
-name = "sd_web"
+name = "lm_web"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -8,7 +8,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-sd_core = { path = "../sd_core" }
+lm_core = { path = "../lm_core" }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 

@@ -2,7 +2,7 @@
 //! force arrows, whirl ghost; orbit camera, presets, carriage / end-support dragging.
 use crate::gl::{self, Mesh, Paint, Renderer};
 use crate::math::{self, Orbit, OrbitCam, M4, V};
-use sd_core::{Inputs, Kind, Results, Status, Support};
+use lm_core::{Inputs, Kind, Results, Status, Support};
 use std::f32::consts::{PI, TAU};
 
 /// What a drag in the view asks the app to change.
@@ -322,7 +322,7 @@ impl Scene {
         // Force arrows: thrust on the nut along the axis, gravity on the payload.
         if tog.arrows {
             let fs = 0.25 / res.f_peak.max(1.0) as f32;
-            let g = (inp.mass_kg * sd_core::G) as f32;
+            let g = (inp.mass_kg * lm_core::G) as f32;
             let thrust_dir = if force >= 0.0 { ax } else { math::scale(ax, -1.0) };
             let arrows = [
                 (lay.at([xn, 0.0, 0.5 * d + 0.03]), thrust_dir, (force.abs() as f32 * fs).max(0.01), [0.2, 0.75, 0.95]),

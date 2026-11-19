@@ -1,7 +1,13 @@
-//! Ball / roller / lead screw linear axis model (pure Rust, host-testable).
+//! leg-mech core: screw actuator model (crate root), knee / ankle linkages (`mech`) and the
+//! actuator ↔ mechanism coupling (`couple`). Pure Rust, host-testable.
+//!
+//! Screw model: ball / roller / lead screw linear axis.
 //!
 //! Textbook relations only; all preset values are generic "typical" estimates.
 //! Internally SI (m, N, s, rad); inputs/outputs carry their unit in the field name.
+
+pub mod couple;
+pub mod mech;
 
 use std::f64::consts::PI;
 
@@ -147,7 +153,7 @@ pub enum Status {
     Fail,
 }
 
-fn grade(margin: f64, warn_below: f64) -> Status {
+pub(crate) fn grade(margin: f64, warn_below: f64) -> Status {
     if margin.is_nan() || margin < 1.0 {
         Status::Fail
     } else if margin < warn_below {

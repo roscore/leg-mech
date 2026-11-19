@@ -1,5 +1,5 @@
 //! Tiny canvas-2D plotting: force–speed envelope and the move-vs-time chart.
-use sd_core::{sample, cycle_time, Results};
+use lm_core::{sample, cycle_time, Results};
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d as Ctx, HtmlCanvasElement};
 

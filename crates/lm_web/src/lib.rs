@@ -1,10 +1,10 @@
-//! Web UI for screw-drive: inputs ↔ sd_core, results table, HUD, plots, search, 3D view.
+//! Web UI for screw-drive: inputs ↔ lm_core, results table, HUD, plots, search, 3D view.
 pub mod gl;
 pub mod math;
 pub mod plot;
 pub mod view3d;
 
-use sd_core::{compute, cycle_time, sample, search, Hit, Inputs, Kind, Results, Status, Support};
+use lm_core::{compute, cycle_time, sample, search, Hit, Inputs, Kind, Results, Status, Support};
 use std::cell::RefCell;
 use std::rc::Rc;
 use view3d::{Action, Scene, Toggles};
