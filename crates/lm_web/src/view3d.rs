@@ -145,11 +145,11 @@ impl Scene {
     }
 
     fn preset_orbit(&self, ankle: bool) -> Orbit {
-        let (target, dist) = if ankle { ([0.0, ANK_H + 0.12, 0.0], 0.85) } else { ([0.0, KNEE_H - 0.02, 0.0], 1.45) };
+        let (target, dist) = if ankle { ([0.0, ANK_H + 0.14, 0.0], 0.8) } else { ([0.0, KNEE_H + 0.02, 0.0], 1.2) };
         match self.preset {
             1 => Orbit { target, yaw: 0.0, pitch: 0.02, dist },
             2 => Orbit { target, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.02, dist },
-            _ => Orbit { target, yaw: 0.75, pitch: 0.3, dist },
+            _ => Orbit { target, yaw: -0.9, pitch: 0.3, dist },
         }
     }
 
@@ -219,14 +219,17 @@ impl Scene {
                 let tip = math::add(knee, math::scale(sd, SHANK));
                 // Fixture: stand post and arm holding the hip block (thigh is fixed).
                 let hip = [0.0, KNEE_H + THIGH, 0.0];
-                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.04, KNEE_H + THIGH + 0.03, 0.04], [-0.22, 0.5 * (KNEE_H + THIGH + 0.03), 0.0]), lit([0.40, 0.42, 0.46])));
-                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.24, 0.035, 0.05], [-0.11, KNEE_H + THIGH, 0.0]), lit([0.40, 0.42, 0.46])));
+                let frame_rgb = [0.40, 0.42, 0.46];
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.035, KNEE_H + THIGH + 0.02, 0.035], [0.0, 0.5 * (KNEE_H + THIGH + 0.02), -0.17]), lit(frame_rgb)));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.035, 0.035, 0.17], [0.0, KNEE_H + THIGH, -0.085]), lit(frame_rgb)));
                 parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.11, 0.05, 0.11], hip), lit(body)));
-                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.40, 0.012, 0.30], [-0.12, 0.006, 0.0]), lit([0.40, 0.42, 0.46])));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.24, 0.012, 0.16], [0.0, 0.006, -0.17]), lit(frame_rgb)));
                 // Thigh and shank: twin side plates around the actuator plane z = 0.
+                // The near (+z) plates are see-through so the actuator between them stays visible.
                 for zs in [0.045f32, -0.045] {
-                    parts.push((CUBE, bar([0.0, KNEE_H, zs], [0.0, KNEE_H + THIGH, zs], z, 0.075, 0.012), lit(body)));
-                    let mut sp = lit(accent);
+                    let alpha = if zs > 0.0 { 0.3 } else { 1.0 };
+                    parts.push((CUBE, bar([0.0, KNEE_H, zs], [0.0, KNEE_H + THIGH, zs], z, 0.075, 0.012), Paint::lit([body[0], body[1], body[2], alpha])));
+                    let mut sp = Paint::lit([accent[0], accent[1], accent[2], alpha]);
                     sp.glow = glow;
                     let k = [0.0, KNEE_H, zs * 0.8];
                     parts.push((CUBE, bar(k, math::add(k, math::scale(sd, SHANK)), z, 0.06, 0.012), sp));
@@ -275,8 +278,10 @@ impl Scene {
                 parts.push((CUBE, bar(ank, [0.0, ANK_H + SHANK, 0.0], [1.0, 0.0, 0.0], 0.05, 0.05), lit(body)));
                 let ub = ank_w([-an.c, 0.0, an.h]);
                 parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [an.c as f32 + 0.03, 0.025, an.w as f32 + 0.03], [-0.5 * an.c as f32, ub[1], 0.0]), lit(body)));
-                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.05, ANK_H + SHANK + 0.03, 0.05], [0.2, 0.5 * (ANK_H + SHANK + 0.03), 0.0]), lit([0.40, 0.42, 0.46])));
-                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.2, 0.03, 0.05], [0.1, ANK_H + SHANK, 0.0]), lit([0.40, 0.42, 0.46])));
+                let frame_rgb = [0.40, 0.42, 0.46];
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.035, ANK_H + SHANK + 0.02, 0.035], [0.0, 0.5 * (ANK_H + SHANK + 0.02), -0.17]), lit(frame_rgb)));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.035, 0.035, 0.17], [0.0, ANK_H + SHANK, -0.085]), lit(frame_rgb)));
+                parts.push((CUBE, math::basis([1., 0., 0.], [0., 1., 0.], z, [0.16, 0.012, 0.12], [0.0, 0.006, -0.17]), lit(frame_rgb)));
                 // Universal joint cross.
                 parts.push((CYL, along([0.0, ANK_H, -0.04], z, 0.08, 0.012, 0.0), lit(pin)));
                 let rx = ank_w(foot_rot(p, 0.0, [1.0, 0.0, 0.0]));
@@ -351,9 +356,15 @@ impl Scene {
                 self.r.shadow(m, model);
             }
         }
-        for (id, model, p) in &parts {
-            if let Some(m) = mesh(*id) {
-                self.r.draw(m, model, *p);
+        // Opaque first (writes depth), translucent last.
+        for pass in [true, false] {
+            for (id, model, p) in &parts {
+                if (p.color[3] >= 1.0) != pass {
+                    continue;
+                }
+                if let Some(m) = mesh(*id) {
+                    self.r.draw(m, model, *p);
+                }
             }
         }
     }

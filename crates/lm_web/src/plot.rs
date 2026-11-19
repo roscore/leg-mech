@@ -8,10 +8,12 @@ pub struct Colors {
     pub fg: &'static str,
     pub grid: &'static str,
     pub mut_: &'static str,
+    /// Card background, for legend boxes.
+    pub bg: &'static str,
 }
 
-pub const DARK: Colors = Colors { fg: "#e4e7ec", grid: "#333a45", mut_: "#9aa3b2" };
-pub const LIGHT: Colors = Colors { fg: "#1d2128", grid: "#d5d9e0", mut_: "#5b6472" };
+pub const DARK: Colors = Colors { fg: "#e4e7ec", grid: "#333a45", mut_: "#9aa3b2", bg: "#1d2128" };
+pub const LIGHT: Colors = Colors { fg: "#1d2128", grid: "#d5d9e0", mut_: "#5b6472", bg: "#ffffff" };
 /// One colour per compared actuator (A, B, C, D).
 pub const SERIES: [&str; 4] = ["#2f9be0", "#e0533a", "#3fbf6f", "#b06fe0"];
 const C_WARN: &str = "#d39a10";
@@ -60,6 +62,13 @@ impl Frame {
     fn text(&self, s: &str, x: f64, y: f64, color: &str) {
         self.ctx.set_fill_style_str(color);
         let _ = self.ctx.fill_text(s, x, y);
+    }
+    /// Translucent box behind `n` legend lines of up to `chars` characters.
+    fn legend_bg(&self, n: usize, chars: usize, col: &Colors) {
+        self.ctx.set_global_alpha(0.82);
+        self.ctx.set_fill_style_str(col.bg);
+        self.ctx.fill_rect(self.x0 + 4.0, self.y0 + 1.0, 6.2 * chars as f64 + 8.0, 13.0 * n as f64 + 4.0);
+        self.ctx.set_global_alpha(1.0);
     }
     fn cursor(&self, x: f64, col: &Colors) {
         if x >= self.xmin && x <= self.xmax {
@@ -123,7 +132,7 @@ pub fn torque(canvas: &HtmlCanvasElement, evals: &[Eval], active: usize, q: f64,
     let (a, b) = range(evals);
     let req_max = evals[0].pts.iter().map(|p| p.tau_req).fold(0.0, f64::max);
     let av_max = evals.iter().flat_map(|e| e.pts.iter().map(|p| p.tau_av)).fold(0.0, f64::max);
-    let ymax = (req_max * 2.5).max(av_max.min(req_max * 4.0)).max(1.0) * 1.08;
+    let ymax = req_max.max(av_max.min(req_max.max(1.0) * 8.0)).max(1.0) * 1.08;
     let Some(f) = setup(canvas, a, b, 0.0, ymax, col, "q (°) · N·m", 0.0) else { return };
     for (i, e) in evals.iter().enumerate() {
         let pts: Vec<(f64, f64)> = e.pts.iter().map(|p| (p.q_deg, p.tau_av)).collect();
@@ -139,6 +148,8 @@ pub fn torque(canvas: &HtmlCanvasElement, evals: &[Eval], active: usize, q: f64,
     let req_pts: Vec<(f64, f64)> = evals[0].pts.iter().map(|p| (p.q_deg, p.tau_req)).collect();
     f.dashed(&req_pts, col.fg, 2.0);
     f.cursor(q, col);
+    let chars = labels.iter().map(|l| l.chars().count()).chain([req.chars().count()]).max().unwrap_or(0);
+    f.legend_bg(labels.len() + 1, chars, col);
     for (i, s) in labels.iter().enumerate() {
         f.text(s, f.x0 + 8.0, f.y0 + 12.0 + 13.0 * i as f64, SERIES[i % 4]);
     }
@@ -160,6 +171,7 @@ pub fn speed(canvas: &HtmlCanvasElement, evals: &[Eval], active: usize, q: f64, 
     }
     f.dashed(&[(a, target), (b, target)], col.fg, 2.0);
     f.cursor(q, col);
+    f.legend_bg(1, target_label.chars().count(), col);
     f.text(target_label, f.x0 + 8.0, f.y0 + 12.0, col.fg);
 }
 
@@ -194,6 +206,7 @@ pub fn geometry(canvas: &HtmlCanvasElement, e: &Eval, q: f64, col: &Colors, labe
         f.ctx.fill_rect(f.px(p.q_deg) - 1.5, f.y0 + f.h - 5.0, 3.0, 5.0);
     }
     f.cursor(q, col);
+    f.legend_bg(if has_mu { 2 } else { 1 }, labels[0].chars().count().max(if has_mu { labels[1].chars().count() } else { 0 }), col);
     f.text(labels[0], f.x0 + 8.0, f.y0 + 12.0, SERIES[0]);
     if has_mu {
         f.text(labels[1], f.x0 + 8.0, f.y0 + 25.0, SERIES[2]);
